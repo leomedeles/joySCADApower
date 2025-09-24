@@ -1,0 +1,9 @@
+.env
+*.local
+*.log
+
+node-red/data
+node_modules/
+
+*/data/
+*/volumes/
