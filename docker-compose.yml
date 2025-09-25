@@ -1,0 +1,86 @@
+﻿version: "3.9"                          # Compose file format version (features available to you)
+
+name: jSp                        # Project name; prefixes container/volume/network names
+
+services:                               # All containers in this stack
+  mosquitto:                            # Service name (MQTT broker)
+    image: eclipse-mosquitto:2          # Use the Eclipse Mosquitto v2 image from Docker Hub
+    container_name: mosquitto           # Fixed container name (easier to read logs/ps)
+    restart: unless-stopped             # Auto-restart unless you explicitly stop it
+    ports:                              # Expose container ports to your Windows host
+      - "1883:1883"                     # Map host 1883 -> container 1883 (MQTT TCP)
+      - "9001:9001"                     # Map host 9001 -> container 9001 (MQTT over WebSockets)
+    volumes:                            # Persist and inject config/data for reproducibility
+      - ./mqtt/config/mqtt.conf:/mosquitto/config/mosquitto.conf:ro # Mount your config file (read-only)
+      - ./mqtt/data:/mosquitto/data     # Named volume for broker persistence (retained msgs, etc.)
+      - ./mqtt/log:/mosquitto/log       # Named volume for logs
+    networks: [jsp-net]               # Attach to the shared app network
+
+  influxdb:                             # Service name (time-series DB / historian)
+    image: influxdb:2.7                 # InfluxDB v2.7 image
+    container_name: influxdb            # Fixed name for convenience
+    restart: unless-stopped             # Auto-restart policy
+    ports:
+      - "8086:8086"                     # Expose InfluxDB HTTP API/UI to host
+    environment:                        # One-time bootstrap settings for first run
+      - DOCKER_INFLUXDB_INIT_MODE=setup # Tell image to self-initialize
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUX_USER} # Admin user (from .env)
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUX_PASS} # Admin password (from .env)
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUX_ORG}           # Organization name (from .env)
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUX_BUCKET}     # Default bucket (from .env)
+      - DOCKER_INFLUXDB_INIT_RETENTION=0                   # 0 = infinite retention (dev-friendly)
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_TOKEN} # Token seeded from .env
+    volumes:
+      - ./influxdb/data:/var/lib/influxdb2 # Persist database files
+      - ./influxdb/config:/etc/influxdb2   # Persist config (users, tokens, orgs)
+    networks: [jsp-net]                # Same shared network
+
+  
+
+  nodered:                               # Service name (flows + meter simulator + ETL)
+    image: nodered/node-red:3.1          # Official Node-RED image (v3.1)
+    container_name: nodered              # Fixed name
+    depends_on: [mosquitto, influxdb]    # Start after broker and DB are up
+    restart: unless-stopped              # Auto-restart policy
+    ports:
+      - "1880:1880"                      # Expose Node-RED editor/UI
+    environment:                         # Env vars your flows/functions will read
+      - TZ=Europe/Berlin                 # Container timezone
+      - MQTT_BROKER=mosquitto            # Internal DNS name of broker (service name)
+      - MQTT_PORT=1883                   # MQTT port inside the network
+      - INFLUX_URL=http://influxdb:8086  # Internal URL to InfluxDB (service name, not localhost)
+      - INFLUX_ORG=${INFLUX_ORG}       # Pass org from .env into Node-RED
+      - INFLUX_BUCKET=${INFLUX_BUCKET} # Pass bucket from .env
+      - INFLUX_TOKEN=${INFLUX_TOKEN} # Pass token from .env (for HTTP write)
+    volumes:
+      - ./node-red:/data                  # Persist flows, settings, and userDir on your disk
+    networks: [jsp-net]                # Same shared network
+
+  grafana:                               # Service name (visualization/HMI)
+    image: grafana/grafana:11.2.0        # Grafana image (pinned version)
+    container_name: grafana              # Fixed name
+    depends_on: [influxdb]               # Needs DB reachable first
+    restart: unless-stopped              # Auto-restart policy
+    ports:
+      - "3000:3000"                      # Expose Grafana web UI
+    environment:                         # Admin creds + pass Influx vars for provisioning
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER}       # Grafana admin username from .env
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD} # Grafana admin password from .env
+      - INFLUXDB_TOKEN=${INFLUX_TOKEN}             # Token for datasource provisioning
+      - INFLUXDB_ORG=${INFLUX_ORG}                       # Org for datasource provisioning
+      - INFLUXDB_BUCKET=${INFLUX_BUCKET}                 # Bucket for datasource provisioning
+      - INFLUXDB_URL=http://influxdb:8086                  # Internal URL Grafana will use
+    volumes:
+      - ./grafana/data:/var/lib/grafana     # Persist Grafana database (users, dashboards)
+      - ./grafana/provisioning:/etc/grafana/provisioning  # Auto-load datasources/dashboards from files
+    networks: [jsp-net]                 # Same shared network
+
+networks:                                 # Declare networks used by services
+  jsp-net:                                # Single user-defined bridge network (default options)
+
+# volumes:                                  # Declare named volumes (Docker manages them)
+#   mosquitto-data:                         # Broker data volume (retained messages etc.)
+#   mosquitto-logs:                         # Broker logs volume
+#   influxdb-data:                          # InfluxDB database files
+#   influxdb-config:                        # InfluxDB config/state (tokens, users)
+#   grafana-data:                           # Grafana SQLite DB (dashboards, users, plugins)
